@@ -28,7 +28,7 @@ Magic TinyLocalize is a **standalone translation system** that requires no setup
 
 ### 1. Copy the Magic File
 
-Download [`.tsx` version](./docs/magic-translate.tsx) and place it in your `src/` folder.
+Download [`.tsx` version](/magic-translate.tsx) and place it in your `src/` folder.
 
 ### 2. Import and Use
 

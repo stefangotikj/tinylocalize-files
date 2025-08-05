@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { ChevronDown, Globe, Search, Plus, Check, X, Edit3, Calendar, Hash } from 'lucide-react';
+import { Search, Plus, Check, X, Edit3, Calendar, Hash } from 'lucide-react';
 
 // Configuration - Set to false to hide Magic UI in production
 const MAGIC_CONFIG = {
@@ -226,10 +226,27 @@ const MagicTranslateUI: React.FC = () => {
   const [currentLang, setCurrentLangState] = useState(globalLang);
   const [showExportModal, setShowExportModal] = useState(false);
   const [exportedCount, setExportedCount] = useState(0);
-  const [showDeleteModal, setShowDeleteModal] = useState<boolean>(false);
-  const [languageToDelete, setLanguageToDelete] = useState<string>('');
+  const [, forceUpdate] = useState({});
+  const [showAddLanguageModal, setShowAddLanguageModal] = useState(false);
+  
+  // Group filtering state
+  const [selectedGroup, setSelectedGroup] = useState<string>('all');
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
+  
+  // Modal resizing state with persistence
+  const [modalSize, setModalSize] = useState(() => {
+    try {
+      const saved = localStorage.getItem('magic-translate-modal-size');
+      return saved ? JSON.parse(saved) : { width: 1200, height: 800 };
+    } catch {
+      return { width: 1200, height: 800 };
+    }
+  });
+  const [isResizing, setIsResizing] = useState(false);
+  const [resizeStart, setResizeStart] = useState({ x: 0, y: 0, width: 0, height: 0 });
+  
+  // Virtual scrolling state
   const [virtualScrollOffset, setVirtualScrollOffset] = useState(0);
-  const [isAddLanguageCollapsed, setIsAddLanguageCollapsed] = useState(false);
   
   const searchInputRef = useRef<HTMLInputElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -248,7 +265,6 @@ const MagicTranslateUI: React.FC = () => {
   }, [searchTerm]);
   
   // Subscribe to language and translation changes
-  const [, forceUpdate] = useState({});
   useEffect(() => {
     const callback = () => {
       setCurrentLangState(globalLang);
@@ -291,6 +307,16 @@ const MagicTranslateUI: React.FC = () => {
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, [isOpen, editingKey]);
 
+  // Reset scroll position when modal opens
+  useEffect(() => {
+    if (isOpen) {
+      setVirtualScrollOffset(0);
+      if (scrollContainerRef.current) {
+        scrollContainerRef.current.scrollTop = 0;
+      }
+    }
+  }, [isOpen]);
+
   const startEdit = (key: string): void => {
     const getValue = (obj: any, path: string): any => {
       return path.split('.').reduce((current, key) => current?.[key], obj);
@@ -318,6 +344,11 @@ const MagicTranslateUI: React.FC = () => {
     notifySubscribers();
     setEditingKey(null);
   };
+  
+  const cancelEdit = (): void => {
+    setEditingKey(null);
+    setEditValue('');
+  };
 
   const addLanguage = (): void => {
     if (newLang.trim()) {
@@ -325,28 +356,7 @@ const MagicTranslateUI: React.FC = () => {
       saveToStorage();
       notifySubscribers();
       setNewLang('');
-    }
-  };
-
-  const removeLanguage = (langToRemove: string): void => {
-    if (Object.keys(globalTranslations).length <= 1) {
-      alert('Cannot remove the last language. At least one language must remain.');
-      return;
-    }
-    
-    if (confirm(`Are you sure you want to remove the "${langToRemove}" language and all its translations?`)) {
-      delete globalTranslations[langToRemove];
-      
-      // If we're removing the current language, switch to the first available language
-      if (globalLang === langToRemove) {
-        const remainingLanguages = Object.keys(globalTranslations);
-        if (remainingLanguages.length > 0) {
-          setCurrentLang(remainingLanguages[0]);
-        }
-      }
-      
-      saveToStorage();
-      notifySubscribers();
+      forceUpdate({});
     }
   };
 
@@ -360,18 +370,99 @@ const MagicTranslateUI: React.FC = () => {
     );
   }, [debouncedSearchTerm, currentLang, globalKeys]);
   
+  // Group parsing and filtering logic
+  const groupedKeys = useMemo(() => {
+    const groups: { [key: string]: string[] } = {};
+    
+    filteredKeys.forEach(key => {
+      const parts = key.split('.');
+      const groupName = parts.length > 1 ? parts[0] : 'ungrouped';
+      
+      if (!groups[groupName]) {
+        groups[groupName] = [];
+      }
+      groups[groupName].push(key);
+    });
+    
+    return groups;
+  }, [filteredKeys]);
+  
+  const availableGroups = useMemo(() => {
+    return Object.keys(groupedKeys).sort();
+  }, [groupedKeys]);
+  
+  const displayKeys = useMemo(() => {
+    // If no groups exist or "all" is selected, show all keys
+    if (availableGroups.length <= 1 || selectedGroup === 'all') {
+      return filteredKeys;
+    }
+    // Show keys from selected group only
+    return groupedKeys[selectedGroup] || [];
+  }, [filteredKeys, groupedKeys, selectedGroup, availableGroups]);
+  
   // Virtual scrolling calculations
   const startIndex = Math.floor(virtualScrollOffset / ITEM_HEIGHT);
-  const endIndex = Math.min(startIndex + VISIBLE_ITEMS, filteredKeys.length);
-  const visibleKeys = filteredKeys.slice(startIndex, endIndex);
-  const totalHeight = filteredKeys.length * ITEM_HEIGHT;
+  const endIndex = Math.min(startIndex + VISIBLE_ITEMS, displayKeys.length);
+  const visibleKeys = displayKeys.slice(startIndex, endIndex);
+  const totalHeight = displayKeys.length * ITEM_HEIGHT;
   const offsetY = startIndex * ITEM_HEIGHT;
   
-  // Handle virtual scroll
+  // Simple scroll handler for virtual scrolling
   const handleScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
     const scrollTop = e.currentTarget.scrollTop;
     setVirtualScrollOffset(scrollTop);
   }, []);
+  
+  // Modal resize handlers
+  const handleResizeStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    setIsResizing(true);
+    setResizeStart({
+      x: e.clientX,
+      y: e.clientY,
+      width: modalSize.width,
+      height: modalSize.height
+    });
+  }, [modalSize]);
+  
+  const handleResizeMove = useCallback((e: MouseEvent) => {
+    if (!isResizing) return;
+    
+    const deltaX = e.clientX - resizeStart.x;
+    const deltaY = e.clientY - resizeStart.y;
+    
+    const newWidth = Math.max(800, Math.min(1600, resizeStart.width + deltaX));
+    const newHeight = Math.max(600, Math.min(1000, resizeStart.height + deltaY));
+    
+    setModalSize({ width: newWidth, height: newHeight });
+  }, [isResizing, resizeStart]);
+  
+  const handleResizeEnd = useCallback(() => {
+    setIsResizing(false);
+    // Save modal size to localStorage
+    try {
+      localStorage.setItem('magic-translate-modal-size', JSON.stringify(modalSize));
+    } catch (e) {
+      console.warn('Failed to save modal size to localStorage:', e);
+    }
+  }, [modalSize]);
+  
+  // Add resize event listeners
+  useEffect(() => {
+    if (isResizing) {
+      document.addEventListener('mousemove', handleResizeMove);
+      document.addEventListener('mouseup', handleResizeEnd);
+      document.body.style.cursor = 'nw-resize';
+      document.body.style.userSelect = 'none';
+      
+      return () => {
+        document.removeEventListener('mousemove', handleResizeMove);
+        document.removeEventListener('mouseup', handleResizeEnd);
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+      };
+    }
+  }, [isResizing, handleResizeMove, handleResizeEnd]);
   
   // Get translation status
   const getTranslationStatus = useCallback((key: string): { status: 'complete' | 'missing' | 'needs_review'; characterCount: number; lastModified: number } => {
@@ -511,12 +602,108 @@ const MagicTranslateUI: React.FC = () => {
         </span>
       </div>
 
-      {/* Add spinning animation for the icon */}
+      {/* Add spinning animation for the icon and scrollbar styles */}
       <style dangerouslySetInnerHTML={{
         __html: `
           @keyframes spin {
             from { transform: rotate(0deg); }
             to { transform: rotate(360deg); }
+          }
+          
+          /* Subtle scrollbar styling */
+          .translation-list::-webkit-scrollbar {
+            width: 6px;
+          }
+          
+          .translation-list::-webkit-scrollbar-track {
+            background: transparent;
+          }
+          
+          .translation-list::-webkit-scrollbar-thumb {
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 3px;
+            transition: background-color 0.2s ease;
+          }
+          
+          .translation-list::-webkit-scrollbar-thumb:hover {
+            background: rgba(0, 0, 0, 0.4);
+          }
+          
+          .translation-list {
+            scrollbar-width: thin;
+            scrollbar-color: rgba(0, 0, 0, 0.2) transparent;
+          }
+          
+          .magic-translate-scroll::-webkit-scrollbar-thumb {
+            background: transparent;
+          }
+          
+          /* Firefox - hide scrollbar */
+          .magic-translate-scroll {
+            scrollbar-width: none;
+            -ms-overflow-style: none;
+          }
+          
+          /* Lazy loading spinning circle animation */
+          @keyframes spin-loader {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+          }
+          
+          .loading-spinner {
+            position: relative;
+          }
+          
+          .loading-spinner::before {
+            content: '';
+            position: absolute;
+            top: 50%;
+            right: 16px;
+            width: 16px;
+            height: 16px;
+            border: 2px solid #e2e8f0;
+            border-top: 2px solid #4f46e5;
+            border-radius: 50%;
+            animation: spin-loader 1s linear infinite;
+            transform: translateY(-50%);
+            z-index: 10;
+          }
+          
+          .loading-spinner::after {
+            content: '';
+            position: absolute;
+            top: 50%;
+            right: 16px;
+            width: 16px;
+            height: 16px;
+            border: 2px solid #e2e8f0;
+            border-top: 2px solid #4f46e5;
+            border-radius: 50%;
+            animation: spin-loader 1s linear infinite;
+            transform: translateY(-50%);
+            z-index: 10;
+          }
+          
+          /* Modal resize handle */
+          .resize-handle {
+            position: absolute;
+            bottom: 0;
+            right: 0;
+            width: 20px;
+            height: 20px;
+            cursor: nw-resize;
+            background: linear-gradient(-45deg, transparent 30%, #4f46e5 30%, #4f46e5 40%, transparent 40%, transparent 60%, #4f46e5 60%, #4f46e5 70%, transparent 70%);
+            opacity: 0.6;
+            transition: opacity 0.2s ease;
+          }
+          
+          .resize-handle:hover {
+            opacity: 1;
+          }
+          
+          /* Smooth scrolling behavior */
+          .magic-translate-scroll {
+            scroll-behavior: smooth;
           }
         `
       }} />
@@ -532,25 +719,150 @@ const MagicTranslateUI: React.FC = () => {
           backgroundColor: 'rgba(0,0,0,0.8)',
           zIndex: 10000,
           display: 'flex',
-          alignItems: 'center',
+          alignItems: 'flex-start',
           justifyContent: 'center',
-          padding: '20px'
+          padding: '20px',
+          paddingTop: '40px',
+          overflowY: 'auto'
         }}>
           <div style={{
             backgroundColor: 'white',
             borderRadius: '16px',
             padding: '24px',
-            maxWidth: '1200px',
-            width: '100%',
+            width: `${modalSize.width}px`,
+            height: `${modalSize.height}px`,
+            maxWidth: '90vw',
             maxHeight: '90vh',
+            minWidth: '800px',
+            minHeight: '600px',
             overflow: 'hidden',
-            boxShadow: '0 25px 50px rgba(0,0,0,0.25)'
+            boxShadow: '0 25px 50px rgba(0,0,0,0.25)',
+            position: 'relative',
+            margin: '0 auto',
+            resize: 'none',
+            transition: isResizing ? 'none' : 'all 0.2s ease'
           }}>
             {/* Header with progress */}
             <div style={{ marginBottom: '20px' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-                <h2 style={{ margin: 0, color: '#333', fontSize: '24px', fontWeight: '600' }}>Magic Translate</h2>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+                  <h2 style={{ margin: 0, color: '#333', fontSize: '24px', fontWeight: '600' }}>Magic Translate</h2>
+                  
+                  {/* Language Dropdown */}
+                  {Object.keys(globalTranslations).length > 1 && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <label style={{
+                        fontSize: '14px',
+                        fontWeight: '600',
+                        color: '#6b7280'
+                      }}>
+                        Language:
+                      </label>
+                      <select
+                        value={currentLang}
+                        onChange={(e) => setCurrentLang(e.target.value)}
+                        style={{
+                          padding: '6px 12px',
+                          border: '2px solid #e2e8f0',
+                          borderRadius: '8px',
+                          fontSize: '14px',
+                          fontWeight: '600',
+                          backgroundColor: 'white',
+                          color: '#333',
+                          cursor: 'pointer',
+                          outline: 'none',
+                          textTransform: 'uppercase',
+                          minWidth: '60px'
+                        }}
+                        onFocus={(e) => {
+                          e.target.style.borderColor = '#4f46e5';
+                        }}
+                        onBlur={(e) => {
+                          e.target.style.borderColor = '#e2e8f0';
+                        }}
+                      >
+                        {Object.keys(globalTranslations).map(lang => (
+                          <option key={lang} value={lang}>
+                            {lang.toUpperCase()}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                  
+                  {/* Group Filter */}
+                  {availableGroups.length > 1 && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <label style={{
+                        fontSize: '14px',
+                        fontWeight: '600',
+                        color: '#6b7280'
+                      }}>
+                        Group:
+                      </label>
+                      <select
+                        value={selectedGroup}
+                        onChange={(e) => setSelectedGroup(e.target.value)}
+                        style={{
+                          padding: '6px 12px',
+                          border: '2px solid #e2e8f0',
+                          borderRadius: '8px',
+                          fontSize: '14px',
+                          fontWeight: '600',
+                          backgroundColor: 'white',
+                          color: '#333',
+                          cursor: 'pointer',
+                          outline: 'none',
+                          minWidth: '120px'
+                        }}
+                        onFocus={(e) => {
+                          e.target.style.borderColor = '#4f46e5';
+                        }}
+                        onBlur={(e) => {
+                          e.target.style.borderColor = '#e2e8f0';
+                        }}
+                      >
+                        <option value="all">📁 All Groups ({filteredKeys.length} total)</option>
+                        {availableGroups.map(group => {
+                          const count = groupedKeys[group]?.length || 0;
+                          const translatedCount = groupedKeys[group]?.filter(key => {
+                            const getValue = (obj: any, path: string): any => {
+                              return path.split('.').reduce((current, key) => current?.[key], obj);
+                            };
+                            const value = getValue(globalTranslations[currentLang] || {}, key);
+                            return value && value.toString().trim() !== '';
+                          }).length || 0;
+                          return (
+                            <option key={group} value={group}>
+                              📂 {group} ({translatedCount}/{count} translated)
+                            </option>
+                          );
+                        })}
+                      </select>
+                    </div>
+                  )}
+                </div>
+                
                 <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                  <button
+                    onClick={() => setShowAddLanguageModal(true)}
+                    style={{
+                      padding: '8px 16px',
+                      backgroundColor: '#4f46e5',
+                      color: 'white',
+                      border: 'none',
+                      borderRadius: '8px',
+                      cursor: 'pointer',
+                      fontSize: '13px',
+                      fontWeight: '600',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '6px'
+                    }}
+                  >
+                    <Plus size={14} />
+                    Add Language
+                  </button>
                   <button
                     onClick={exportTranslations}
                     style={{
@@ -620,228 +932,7 @@ const MagicTranslateUI: React.FC = () => {
               })()}
             </div>
 
-            {/* Collapsible Add Language Section with Smooth Animations */}
-            <div style={{ 
-              marginBottom: '20px', 
-              border: '1px solid #e2e8f0',
-              borderRadius: '16px',
-              backgroundColor: '#ffffff',
-              boxShadow: '0 2px 8px rgba(0,0,0,0.04)',
-              overflow: 'hidden',
-              transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)'
-            }}>
-              {/* Collapsible Header */}
-              <button
-                onClick={() => setIsAddLanguageCollapsed(!isAddLanguageCollapsed)}
-                style={{
-                  width: '100%',
-                  padding: '16px 20px',
-                  backgroundColor: 'transparent',
-                  border: 'none',
-                  cursor: 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  transition: 'all 0.2s ease',
-                  borderRadius: isAddLanguageCollapsed ? '16px' : '16px 16px 0 0'
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.backgroundColor = '#f8fafc';
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.backgroundColor = 'transparent';
-                }}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                  <Globe size={20} style={{ color: '#4f46e5' }} />
-                  <h3 style={{ 
-                    margin: 0, 
-                    fontSize: '16px', 
-                    fontWeight: '600', 
-                    color: '#334155'
-                  }}>
-                    Add New Language
-                  </h3>
-                </div>
-                <div style={{ 
-                  transform: `rotate(${isAddLanguageCollapsed ? '0deg' : '180deg'})`,
-                  transition: 'transform 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
-                  color: '#64748b'
-                }}>
-                  <ChevronDown size={20} />
-                </div>
-              </button>
-              
-              {/* Collapsible Content with Smooth Animation */}
-              <div style={{
-                maxHeight: isAddLanguageCollapsed ? '0px' : '200px',
-                opacity: isAddLanguageCollapsed ? 0 : 1,
-                overflow: 'hidden',
-                transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
-                transform: `translateY(${isAddLanguageCollapsed ? '-10px' : '0px'})`
-              }}>
-                <div style={{ 
-                  padding: '0 20px 20px 20px',
-                  borderTop: '1px solid #f1f5f9'
-                }}>
-                  <p style={{ 
-                    margin: '16px 0 16px 0', 
-                    fontSize: '13px', 
-                    color: '#64748b',
-                    fontWeight: '400',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '6px'
-                  }}>
-                    <kbd style={{
-                      padding: '2px 6px',
-                      backgroundColor: '#f1f5f9',
-                      borderRadius: '4px',
-                      fontSize: '11px',
-                      fontWeight: '600',
-                      color: '#4f46e5'
-                    }}>Ctrl+K</kbd>
-                    to focus search
-                  </p>
-                  
-                  {/* Language Tabs inside collapsible section */}
-                  <div style={{ marginBottom: '16px' }}>
-                    <h4 style={{ 
-                      margin: '0 0 12px 0', 
-                      fontSize: '14px', 
-                      fontWeight: '600', 
-                      color: '#334155'
-                    }}>
-                      Available Languages
-                    </h4>
-                    <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
-                      {Object.keys(globalTranslations).map(lang => (
-                        <div
-                          key={lang}
-                          style={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            border: currentLang === lang ? '2px solid #4f46e5' : '2px solid #e2e8f0',
-                            backgroundColor: currentLang === lang ? '#4f46e5' : 'white',
-                            borderRadius: '20px',
-                            overflow: 'hidden',
-                            transition: 'all 0.2s ease'
-                          }}
-                        >
-                          <button
-                            onClick={() => setCurrentLang(lang)}
-                            style={{
-                              padding: '6px 12px',
-                              border: 'none',
-                              backgroundColor: 'transparent',
-                              color: currentLang === lang ? 'white' : '#333',
-                              cursor: 'pointer',
-                              fontSize: '13px',
-                              fontWeight: '600',
-                              textTransform: 'uppercase',
-                              transition: 'all 0.2s ease'
-                            }}
-                          >
-                            {lang}
-                          </button>
-                          {Object.keys(globalTranslations).length > 1 && (
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setLanguageToDelete(lang);
-                                setShowDeleteModal(true);
-                              }}
-                              style={{
-                                padding: '6px 8px',
-                                border: 'none',
-                                backgroundColor: 'transparent',
-                                color: currentLang === lang ? 'white' : '#999',
-                                cursor: 'pointer',
-                                fontSize: '14px',
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent: 'center',
-                                borderLeft: currentLang === lang ? '1px solid rgba(255,255,255,0.3)' : '1px solid #e2e8f0',
-                                transition: 'all 0.2s ease'
-                              }}
-                              title={`Remove ${lang} language`}
-                            >
-                              <X size={12} />
-                            </button>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                  
-                  <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
-                    <input
-                      type="text"
-                      value={newLang}
-                      onChange={(e) => setNewLang(e.target.value)}
-                      placeholder="Add language (e.g., fr, de, ja)"
-                      onKeyPress={(e) => e.key === 'Enter' && addLanguage()}
-                      style={{
-                        flex: 1,
-                        padding: '12px 16px',
-                        border: '2px solid #e2e8f0',
-                        borderRadius: '12px',
-                        fontSize: '14px',
-                        color: '#333',
-                        backgroundColor: '#fff',
-                        transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)',
-                        outline: 'none'
-                      }}
-                      onFocus={(e) => {
-                        e.target.style.borderColor = '#4f46e5';
-                        e.target.style.boxShadow = '0 0 0 3px rgba(79, 70, 229, 0.1)';
-                        e.target.style.transform = 'scale(1.02)';
-                      }}
-                      onBlur={(e) => {
-                        e.target.style.borderColor = '#e2e8f0';
-                        e.target.style.boxShadow = 'none';
-                        e.target.style.transform = 'scale(1)';
-                      }}
-                    />
-                    <button
-                      onClick={addLanguage}
-                      disabled={!newLang.trim()}
-                      style={{
-                        padding: '12px 20px',
-                        backgroundColor: newLang.trim() ? '#4f46e5' : '#94a3b8',
-                        color: 'white',
-                        border: 'none',
-                        borderRadius: '12px',
-                        cursor: newLang.trim() ? 'pointer' : 'not-allowed',
-                        fontSize: '14px',
-                        fontWeight: '600',
-                        whiteSpace: 'nowrap',
-                        transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '8px',
-                        transform: newLang.trim() ? 'scale(1)' : 'scale(0.95)'
-                      }}
-                      onMouseEnter={(e) => {
-                        if (newLang.trim()) {
-                          e.currentTarget.style.backgroundColor = '#3730a3';
-                          e.currentTarget.style.transform = 'scale(1.05)';
-                        }
-                      }}
-                      onMouseLeave={(e) => {
-                        if (newLang.trim()) {
-                          e.currentTarget.style.backgroundColor = '#4f46e5';
-                          e.currentTarget.style.transform = 'scale(1)';
-                        }
-                      }}
-                    >
-                      <Plus size={16} />
-                      Add
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
+
 
 
 
@@ -958,50 +1049,310 @@ const MagicTranslateUI: React.FC = () => {
               </div>
             </div>
             
-            {/* Virtual Scrolling Container */}
-            <div 
+            {/* Translation Container */}
+            <div
               ref={scrollContainerRef}
+              className="translation-list"
+              onScroll={handleScroll}
               style={{
-                height: `${containerHeight}px`,
+                height: `${modalSize.height - 300}px`,
                 overflowY: 'auto',
                 overflowX: 'hidden',
-                scrollbarWidth: 'thin',
-                scrollbarColor: '#4f46e5 #f1f5f9',
-                border: '1px solid #e2e8f0',
+                position: 'relative',
+                backgroundColor: '#fafafa',
                 borderRadius: '12px',
-                backgroundColor: '#fafbfc'
-              }}
-              onScroll={handleScroll}
-              onMouseEnter={(e) => {
-                // Add custom scrollbar styles for webkit browsers
-                if (!document.getElementById('magic-scrollbar-styles')) {
-                  const style = document.createElement('style');
-                  style.id = 'magic-scrollbar-styles';
-                  style.textContent = `
-                    .magic-translate-scroll::-webkit-scrollbar {
-                      width: 10px;
-                    }
-                    .magic-translate-scroll::-webkit-scrollbar-track {
-                      background: #f1f5f9;
-                      border-radius: 10px;
-                    }
-                    .magic-translate-scroll::-webkit-scrollbar-thumb {
-                      background: linear-gradient(180deg, #4f46e5 0%, #3730a3 100%);
-                      border-radius: 10px;
-                      border: 1px solid #e5e7eb;
-                    }
-                    .magic-translate-scroll::-webkit-scrollbar-thumb:hover {
-                      background: linear-gradient(180deg, #3730a3 0%, #312e81 100%);
-                    }
-                  `;
-                  document.head.appendChild(style);
-                }
-                e.currentTarget.classList.add('magic-translate-scroll');
+                border: '1px solid #e2e8f0',
+                scrollBehavior: 'smooth'
               }}
             >
-              {/* Virtual Scrolling Spacer */}
-              <div style={{ height: `${totalHeight}px`, position: 'relative' }}>
-                <div style={{ transform: `translateY(${offsetY}px)` }}>
+              {availableGroups.length > 1 && selectedGroup === 'all' ? (
+                // Grouped View
+                <div style={{ padding: '12px' }}>
+                  {availableGroups.map(groupName => {
+                    const groupKeys = groupedKeys[groupName] || [];
+                    const isExpanded = expandedGroups.has(groupName);
+                    const translatedCount = groupKeys.filter(key => {
+                      const getValue = (obj: any, path: string): any => {
+                        return path.split('.').reduce((current, key) => current?.[key], obj);
+                      };
+                      const value = getValue(globalTranslations[currentLang] || {}, key);
+                      return value && value.toString().trim() !== '';
+                    }).length;
+                    
+                    return (
+                      <div key={groupName} style={{ marginBottom: '16px' }}>
+                        {/* Group Header */}
+                        <div
+                          onClick={() => {
+                            const newExpanded = new Set(expandedGroups);
+                            if (isExpanded) {
+                              newExpanded.delete(groupName);
+                            } else {
+                              newExpanded.add(groupName);
+                            }
+                            setExpandedGroups(newExpanded);
+                          }}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            padding: '12px 16px',
+                            backgroundColor: 'white',
+                            borderRadius: '8px',
+                            border: '2px solid #e2e8f0',
+                            cursor: 'pointer',
+                            marginBottom: isExpanded ? '8px' : '0',
+                            transition: 'all 0.2s ease'
+                          }}
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.borderColor = '#4f46e5';
+                            e.currentTarget.style.backgroundColor = '#f8fafc';
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.borderColor = '#e2e8f0';
+                            e.currentTarget.style.backgroundColor = 'white';
+                          }}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                            <span style={{ fontSize: '16px' }}>
+                              {isExpanded ? '📂' : '📁'}
+                            </span>
+                            <div>
+                              <h3 style={{ margin: 0, fontSize: '16px', fontWeight: '600', color: '#333' }}>
+                                {groupName}
+                              </h3>
+                              <p style={{ margin: 0, fontSize: '12px', color: '#666' }}>
+                                {translatedCount}/{groupKeys.length} translated ({Math.round((translatedCount / groupKeys.length) * 100)}%)
+                              </p>
+                            </div>
+                          </div>
+                          <div style={{
+                            width: '24px',
+                            height: '24px',
+                            borderRadius: '50%',
+                            backgroundColor: translatedCount === groupKeys.length ? '#10b981' : '#f59e0b',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            color: 'white',
+                            fontSize: '12px',
+                            fontWeight: '600'
+                          }}>
+                            {Math.round((translatedCount / groupKeys.length) * 100)}
+                          </div>
+                        </div>
+                        
+                        {/* Group Items */}
+                        {isExpanded && (
+                          <div style={{ marginLeft: '16px' }}>
+                            {groupKeys.map(key => {
+                              const getValue = (obj: any, path: string): any => {
+                                return path.split('.').reduce((current, key) => current?.[key], obj);
+                              };
+                              const value = getValue(globalTranslations[currentLang] || {}, key);
+                              const isEditing = editingKey === key;
+                              const status = getTranslationStatus(key);
+                              
+                              const statusColors = {
+                                complete: '#10b981',
+                                needs_review: '#f59e0b', 
+                                missing: '#ef4444'
+                              };
+                              
+                              const statusBgColors = {
+                                complete: '#f0fdf4',
+                                needs_review: '#fffbeb',
+                                missing: '#fef2f2'
+                              };
+                              
+                              return (
+                                <div key={key} 
+                                  className=""
+                                  style={{
+                                    minHeight: `${ITEM_HEIGHT}px`,
+                                    height: 'auto',
+                                    padding: '12px',
+                                    margin: '6px 0',
+                                    border: `2px solid ${isEditing ? '#4f46e5' : '#e2e8f0'}`,
+                                    borderRadius: '8px',
+                                    backgroundColor: isEditing ? '#f8fafc' : statusBgColors[status.status],
+                                    boxShadow: isEditing ? '0 4px 12px rgba(79, 70, 229, 0.15)' : '0 1px 3px rgba(0,0,0,0.05)',
+                                    transition: 'all 0.2s ease',
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    gap: '8px',
+                                    transform: isEditing ? 'scale(1.01)' : 'scale(1)',
+                                    position: 'relative',
+                                    overflow: 'visible',
+                                    opacity: 1
+                                  }}
+                                  onMouseEnter={(e) => {
+                                    if (!isEditing) {
+                                      e.currentTarget.style.transform = 'scale(1.005) translateY(-1px)';
+                                      e.currentTarget.style.boxShadow = '0 2px 8px rgba(0,0,0,0.08)';
+                                    }
+                                  }}
+                                  onMouseLeave={(e) => {
+                                    if (!isEditing) {
+                                      e.currentTarget.style.transform = 'scale(1)';
+                                      e.currentTarget.style.boxShadow = '0 1px 3px rgba(0,0,0,0.05)';
+                                    }
+                                  }}
+                                >
+                                  {/* Rest of translation item content will be added next */}
+                                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px' }}>
+                                    <div style={{ flex: 1, minWidth: 0 }}>
+                                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
+                                        <div style={{
+                                          width: '8px',
+                                          height: '8px', 
+                                          borderRadius: '50%',
+                                          backgroundColor: statusColors[status.status],
+                                          flexShrink: 0
+                                        }}></div>
+                                        <span style={{
+                                          fontSize: '13px',
+                                          fontWeight: '600',
+                                          color: '#374151',
+                                          fontFamily: 'monospace',
+                                          wordBreak: 'break-all'
+                                        }}>
+                                          {key.split('.').pop()} {/* Show only the key part after the dot */}
+                                        </span>
+                                        <span style={{
+                                          fontSize: '11px',
+                                          color: '#9ca3af',
+                                          fontWeight: '500'
+                                        }}>
+                                          ({key})
+                                        </span>
+                                      </div>
+                                      
+                                      {isEditing ? (
+                                        <textarea
+                                          value={editValue}
+                                          onChange={(e) => setEditValue(e.target.value)}
+                                          onKeyDown={(e) => {
+                                            if (e.key === 'Enter' && !e.shiftKey) {
+                                              e.preventDefault();
+                                              saveEdit();
+                                            } else if (e.key === 'Escape') {
+                                              cancelEdit();
+                                            }
+                                          }}
+                                          autoFocus
+                                          style={{
+                                            width: '100%',
+                                            minHeight: '60px',
+                                            padding: '8px 12px',
+                                            border: '2px solid #4f46e5',
+                                            borderRadius: '6px',
+                                            fontSize: '14px',
+                                            fontFamily: 'inherit',
+                                            resize: 'vertical',
+                                            outline: 'none',
+                                            backgroundColor: 'white'
+                                          }}
+                                        />
+                                      ) : (
+                                        <div
+                                          onClick={() => startEdit(key)}
+                                          style={{
+                                            padding: '8px 12px',
+                                            backgroundColor: value ? 'rgba(255,255,255,0.8)' : 'rgba(239, 68, 68, 0.1)',
+                                            borderRadius: '6px',
+                                            border: '1px solid rgba(0,0,0,0.1)',
+                                            cursor: 'pointer',
+                                            minHeight: '36px',
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            fontSize: '14px',
+                                            color: value ? '#374151' : '#9ca3af',
+                                            fontStyle: value ? 'normal' : 'italic',
+                                            transition: 'all 0.2s ease',
+                                            wordBreak: 'break-word'
+                                          }}
+                                          onMouseEnter={(e) => {
+                                            e.currentTarget.style.backgroundColor = value ? 'rgba(255,255,255,0.95)' : 'rgba(239, 68, 68, 0.15)';
+                                          }}
+                                          onMouseLeave={(e) => {
+                                            e.currentTarget.style.backgroundColor = value ? 'rgba(255,255,255,0.8)' : 'rgba(239, 68, 68, 0.1)';
+                                          }}
+                                        >
+                                          {value || `Click to add ${currentLang.toUpperCase()} translation...`}
+                                        </div>
+                                      )}
+                                    </div>
+                                    
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', alignItems: 'flex-end' }}>
+                                      {isEditing ? (
+                                        <div style={{ display: 'flex', gap: '4px' }}>
+                                          <button
+                                            onClick={saveEdit}
+                                            style={{
+                                              padding: '4px 8px',
+                                              backgroundColor: '#10b981',
+                                              color: 'white',
+                                              border: 'none',
+                                              borderRadius: '4px',
+                                              cursor: 'pointer',
+                                              fontSize: '12px',
+                                              fontWeight: '600'
+                                            }}
+                                          >
+                                            <Check size={12} />
+                                          </button>
+                                          <button
+                                            onClick={cancelEdit}
+                                            style={{
+                                              padding: '4px 8px',
+                                              backgroundColor: '#ef4444',
+                                              color: 'white',
+                                              border: 'none',
+                                              borderRadius: '4px',
+                                              cursor: 'pointer',
+                                              fontSize: '12px',
+                                              fontWeight: '600'
+                                            }}
+                                          >
+                                            <X size={12} />
+                                          </button>
+                                        </div>
+                                      ) : (
+                                        <button
+                                          onClick={() => startEdit(key)}
+                                          style={{
+                                            padding: '4px 8px',
+                                            backgroundColor: '#4f46e5',
+                                            color: 'white',
+                                            border: 'none',
+                                            borderRadius: '4px',
+                                            cursor: 'pointer',
+                                            fontSize: '12px',
+                                            fontWeight: '600',
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            gap: '4px'
+                                          }}
+                                        >
+                                          <Edit3 size={12} />
+                                        </button>
+                                      )}
+                                    </div>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                // Flat/Virtual Scrolling View
+                <div style={{ height: `${totalHeight}px`, position: 'relative' }}>
+                  <div style={{ transform: `translateY(${offsetY}px)` }}>
                   {visibleKeys.map(key => {
                     const getValue = (obj: any, path: string): any => {
                       return path.split('.').reduce((current, key) => current?.[key], obj);
@@ -1023,7 +1374,9 @@ const MagicTranslateUI: React.FC = () => {
                     };
 
                     return (
-                      <div key={key} style={{
+                      <div key={key} 
+className=""
+                        style={{
                         minHeight: `${ITEM_HEIGHT}px`,
                         height: 'auto',
                         padding: '16px',
@@ -1038,7 +1391,8 @@ const MagicTranslateUI: React.FC = () => {
                         gap: '12px',
                         transform: isEditing ? 'scale(1.02)' : 'scale(1)',
                         position: 'relative',
-                        overflow: 'visible'
+                        overflow: 'visible',
+                        opacity: 1
                       }}
                       onMouseEnter={(e) => {
                         if (!isEditing) {
@@ -1236,13 +1590,217 @@ const MagicTranslateUI: React.FC = () => {
                       </div>
                     );
                   })}
+                  </div>
                 </div>
-              </div>
+              )}
+            </div>
+            
+            {/* Resize Handle */}
+            <div 
+              className="resize-handle"
+              onMouseDown={handleResizeStart}
+              title="Drag to resize modal"
+            />
+          </div>
+        </div>
+      )}
+      
+      {/* Add Language Modal */}
+      {showAddLanguageModal && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: 'rgba(0, 0, 0, 0.5)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 10001
+        }}>
+          <div style={{
+            backgroundColor: 'white',
+            borderRadius: '16px',
+            padding: '24px',
+            width: '400px',
+            maxWidth: '90vw',
+            boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04)'
+          }}>
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              marginBottom: '20px'
+            }}>
+              <h3 style={{
+                margin: 0,
+                fontSize: '18px',
+                fontWeight: '600',
+                color: '#333',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px'
+              }}>
+                <Plus size={20} style={{ color: '#4f46e5' }} />
+                Add New Language
+              </h3>
+              <button
+                onClick={() => setShowAddLanguageModal(false)}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  fontSize: '20px',
+                  cursor: 'pointer',
+                  color: '#999',
+                  padding: '4px'
+                }}
+              >
+                ×
+              </button>
+            </div>
+            
+            <div style={{ marginBottom: '20px' }}>
+              <label style={{
+                display: 'block',
+                marginBottom: '8px',
+                fontSize: '14px',
+                fontWeight: '600',
+                color: '#374151'
+              }}>
+                Language Code
+              </label>
+              <input
+                type="text"
+                value={newLang}
+                onChange={(e) => setNewLang(e.target.value)}
+                placeholder="e.g., fr, de, ja, es"
+                style={{
+                  width: '100%',
+                  padding: '12px 16px',
+                  border: '2px solid #e2e8f0',
+                  borderRadius: '8px',
+                  fontSize: '14px',
+                  outline: 'none',
+                  transition: 'border-color 0.2s ease',
+                  boxSizing: 'border-box',
+                  backgroundColor: 'white',
+                  color: 'black'
+                }}
+                onFocus={(e) => {
+                  e.target.style.borderColor = '#4f46e5';
+                }}
+                onBlur={(e) => {
+                  e.target.style.borderColor = '#e2e8f0';
+                }}
+                onKeyPress={(e) => {
+                  if (e.key === 'Enter' && newLang.trim()) {
+                    addLanguage();
+                    setShowAddLanguageModal(false);
+                  }
+                }}
+                autoFocus
+              />
+              <p style={{
+                margin: '8px 0 12px 0',
+                fontSize: '12px',
+                color: '#6b7280'
+              }}>
+                Enter a language code (e.g., "fr" for French, "de" for German)
+              </p>
+              
+              {/* Existing Languages Dropdown */}
+              {Object.keys(globalTranslations).length > 0 && (
+                <div style={{ marginTop: '16px' }}>
+                  <label style={{
+                    display: 'block',
+                    marginBottom: '8px',
+                    fontSize: '14px',
+                    fontWeight: '600',
+                    color: '#374151'
+                  }}>
+                    Existing Languages
+                  </label>
+                  <div style={{
+                    padding: '12px',
+                    backgroundColor: '#f9fafb',
+                    border: '1px solid #e5e7eb',
+                    borderRadius: '8px',
+                    fontSize: '13px'
+                  }}>
+                    <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                      {Object.keys(globalTranslations).map(lang => (
+                        <span
+                          key={lang}
+                          style={{
+                            padding: '4px 8px',
+                            backgroundColor: '#4f46e5',
+                            color: 'white',
+                            borderRadius: '12px',
+                            fontSize: '12px',
+                            fontWeight: '600',
+                            textTransform: 'uppercase'
+                          }}
+                        >
+                          {lang}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+            
+            <div style={{
+              display: 'flex',
+              gap: '12px',
+              justifyContent: 'flex-end'
+            }}>
+              <button
+                onClick={() => setShowAddLanguageModal(false)}
+                style={{
+                  padding: '10px 20px',
+                  backgroundColor: '#f3f4f6',
+                  color: '#374151',
+                  border: 'none',
+                  borderRadius: '8px',
+                  cursor: 'pointer',
+                  fontSize: '14px',
+                  fontWeight: '600'
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  if (newLang.trim()) {
+                    addLanguage();
+                    setShowAddLanguageModal(false);
+                  }
+                }}
+                disabled={!newLang.trim()}
+                style={{
+                  padding: '10px 20px',
+                  backgroundColor: newLang.trim() ? '#4f46e5' : '#d1d5db',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '8px',
+                  cursor: newLang.trim() ? 'pointer' : 'not-allowed',
+                  fontSize: '14px',
+                  fontWeight: '600',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px'
+                }}
+              >
+                <Plus size={16} />
+                Add Language
+              </button>
             </div>
           </div>
         </div>
       )}
-
+      
       {/* Professional Export Success Modal */}
       {showExportModal && (
         <div style={{
@@ -1290,73 +1848,6 @@ const MagicTranslateUI: React.FC = () => {
             >
               Got it!
             </button>
-          </div>
-        </div>
-      )}
-
-      {/* Delete Confirmation Modal */}
-      {showDeleteModal && (
-        <div style={{
-          position: 'fixed',
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          backgroundColor: 'rgba(0,0,0,0.5)',
-          zIndex: 10001,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center'
-        }}>
-          <div style={{
-            backgroundColor: 'white',
-            borderRadius: '15px',
-            padding: '30px',
-            maxWidth: '400px',
-            width: '90%',
-            boxShadow: '0 20px 40px rgba(0,0,0,0.3)',
-            textAlign: 'center'
-          }}>
-            <h3 style={{ margin: '0 0 15px 0', color: '#333', fontSize: '24px' }}>
-              Confirm Deletion
-            </h3>
-            <p style={{ margin: '0 0 20px 0', color: '#666', fontSize: '16px', lineHeight: '1.5' }}>
-              Are you sure you want to remove the "{languageToDelete}" language and all its translations?
-            </p>
-            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <button
-                onClick={() => {
-                  setShowDeleteModal(false);
-                  removeLanguage(languageToDelete);
-                }}
-                style={{
-                  padding: '12px 24px',
-                  backgroundColor: '#dc3545',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '8px',
-                  cursor: 'pointer',
-                  fontSize: '16px',
-                  fontWeight: 'bold'
-                }}
-              >
-                Delete
-              </button>
-              <button
-                onClick={() => setShowDeleteModal(false)}
-                style={{
-                  padding: '12px 24px',
-                  backgroundColor: '#6c757d',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '8px',
-                  cursor: 'pointer',
-                  fontSize: '16px'
-                }}
-              >
-                Cancel
-              </button>
-            </div>
           </div>
         </div>
       )}

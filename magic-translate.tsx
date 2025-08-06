@@ -63,21 +63,37 @@ const loadProductionTranslations = async (): Promise<void> => {
   }
 };
 
-// Load production translations on startup
-if (typeof window !== 'undefined') {
-  // In production mode, we need to ensure languages are available immediately
-  if (!MAGIC_CONFIG.enableUI) {
-    // Pre-populate with expected languages to avoid empty state
-    globalTranslations = {
-      'en': {},
-      'fr': {},
-      'es': {},
-      'de': {}
-    };
-  }
+// Initialize translations
+const initializeTranslations = async () => {
+  // First load production translations
+  await loadProductionTranslations();
   
-  // Load actual production files (will override the empty objects above)
-  loadProductionTranslations();
+  // Get list of actually loaded languages from files
+  const loadedLanguages = Object.keys(globalTranslations).filter(
+    lang => Object.keys(globalTranslations[lang] || {}).length > 0
+  );
+  
+  // Clean up old languages from localStorage in both dev and prod
+  const existingLanguages = Object.keys(globalTranslations);
+  const languagesToRemove = existingLanguages.filter(lang => !loadedLanguages.includes(lang));
+  
+  if (languagesToRemove.length > 0) {
+    languagesToRemove.forEach(lang => {
+      delete globalTranslations[lang];
+      delete translationMetadata[lang];
+    });
+    
+    // Update localStorage if in dev mode
+    if (MAGIC_CONFIG.enableUI) {
+      localStorage.setItem('magic-translations', JSON.stringify(globalTranslations));
+      localStorage.setItem('magic-translation-metadata', JSON.stringify(translationMetadata));
+    }
+  }
+};
+
+// Start initialization
+if (typeof window !== 'undefined') {
+  initializeTranslations().catch(console.error);
 }
 
 // Auto-save to localStorage with metadata
@@ -1251,7 +1267,8 @@ const MagicTranslateUI: React.FC = () => {
                                             fontFamily: 'inherit',
                                             resize: 'vertical',
                                             outline: 'none',
-                                            backgroundColor: 'white'
+                                            backgroundColor: 'white',
+                                            color: '#000'
                                           }}
                                         />
                                       ) : (
@@ -1885,6 +1902,32 @@ const enhancedT = (key: string, vars: Record<string, string | number> = {}): str
 };
 
 // Export the enhanced translation function
-export { enhancedT as t };
+export const t = enhancedT;
 
-export default MagicTranslateUI;
+// Export all public API functions
+const publicAPI = {
+  t,
+  getCurrentLang,
+  setLang,
+  getAvailableLanguages,
+  subscribeToLanguageChange,
+  unsubscribeFromLanguageChange,
+  useMagicTranslate
+};
+
+// For CommonJS compatibility
+// @ts-ignore
+if (typeof module !== 'undefined' && module.exports) {
+  // @ts-ignore
+  module.exports = {
+    ...publicAPI,
+    default: MagicTranslateUI,
+    MagicTranslateUI
+  };
+}
+
+// For ES modules
+export default {
+  ...publicAPI,
+  MagicTranslateUI
+};
